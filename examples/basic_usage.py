@@ -26,10 +26,10 @@ def main():
     tracer.complete_event(memory, "store", start_ts=160, end_ts=190)
     
     # Add scoped events
-    tracer.start_event(alu, "complex_calculation", start_ts=200)
-    tracer.start_event(fpu, "sqrt_operation", start_ts=210)
-    tracer.end_event(fpu, end_ts=230)
-    tracer.end_event(alu, end_ts=250)
+    tracer.start_event(alu, "complex_calculation", ts_cycles=200)
+    tracer.start_event(fpu, "sqrt_operation", ts_cycles=210)
+    tracer.end_event(fpu, ts_cycles=230)
+    tracer.end_event(alu, ts_cycles=250)
     
     # Save the trace
     tracer.save("example_trace.json")
