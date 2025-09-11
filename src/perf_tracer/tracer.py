@@ -36,7 +36,10 @@ class PerfettoTracer:
 
     说明:
     - 传入的 cycles 会按: cycles * ns_per_cycle / 1000.0 -> 微秒(us) 存入 JSON.
+    - 可使用 get_global_tracer() 获取全局实例，使用 init_global_tracer() 初始化全局实例
     """
+    
+    _global_instance: Optional[PerfettoTracer] = None
 
     def __init__(
         self,
@@ -193,3 +196,39 @@ class PerfettoTracer:
         if tid_or_unit not in self._unit_to_tid:
             raise KeyError(f"Unit '{tid_or_unit}' has not been registered. Call register_unit() first.")
         return self._unit_to_tid[tid_or_unit]
+
+    @classmethod
+    def init_global_tracer(
+        cls,
+        process_name: str = "Simulator",
+        ns_per_cycle: float = 1.0,
+        pid: int = 1,
+    ) -> PerfettoTracer:
+        """
+        初始化全局 PerfettoTracer 实例。
+        
+        Args:
+            process_name: 进程名
+            ns_per_cycle: 1 个周期等于多少纳秒
+            pid: 进程 ID
+            
+        Returns:
+            初始化的 PerfettoTracer 实例
+        """
+        cls._global_instance = cls(process_name=process_name, ns_per_cycle=ns_per_cycle, pid=pid)
+        return cls._global_instance
+
+    @classmethod
+    def get_global_tracer(cls) -> PerfettoTracer:
+        """
+        获取全局 PerfettoTracer 实例。
+        
+        Returns:
+            全局 PerfettoTracer 实例
+            
+        Raises:
+            RuntimeError: 如果全局实例尚未初始化
+        """
+        if cls._global_instance is None:
+            raise RuntimeError("Global PerfettoTracer instance has not been initialized. Call init_global() first.")
+        return cls._global_instance
