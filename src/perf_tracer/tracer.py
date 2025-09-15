@@ -4,7 +4,7 @@ Tracer module for creating Perfetto-compatible trace events.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 import json
 import time
 from contextlib import contextmanager
@@ -232,3 +232,21 @@ class PerfettoTracer:
         if cls._global_instance is None:
             raise RuntimeError("Global PerfettoTracer instance has not been initialized. Call init_global() first.")
         return cls._global_instance
+
+    @contextmanager
+    def record_event(self, tid_or_unit: int | str, name: str, time_fn: Callable[[], float]) -> None:
+        """
+        Context manager for recording a scoped event (B/E).
+        
+        Args:
+            tid_or_unit: 线程 ID 或单元名称
+            name: 事件名称
+            time_fn: 返回当前时间 (cycles) 的函数
+        """
+        start_cycles = time_fn()
+        self.start_event(tid_or_unit, name, start_cycles)
+        try:
+            yield None
+        finally:
+            end_cycles = time_fn()
+            self.end_event(tid_or_unit, end_cycles)
