@@ -50,7 +50,6 @@ def test_register_track_without_module_uses_defaults() -> None:
 
     assert track.module_name == "default"
     assert track.pid == 100000
-    assert track.category is None
     assert tracer.list_tracks() == ["default.io"]
     assert tracer._open_events[track] == []
 
@@ -59,23 +58,14 @@ def test_register_track_without_module_uses_defaults() -> None:
     assert same_track == track
 
 
-def test_register_sub_track_assigns_category() -> None:
-    tracer = PerfettoTracer()
-    track = tracer.register_track("pipeline")
-
-    sub_track = tracer.register_sub_track(track, "stage0")
-
-    assert sub_track.module_name == track.module_name
-    assert sub_track.tid == track.tid
-    assert sub_track.category == "stage0"
 
 
 def test_start_and_end_event_nested_stack() -> None:
     tracer = PerfettoTracer(ns_per_cycle=50.0)
     track = tracer.register_track("runner")
 
-    tracer.start_event(track, "outer", ts_cycles=10.0)
-    tracer.start_event(track, "inner", ts_cycles=20.0)
+    tracer.start_event(track, ts_cycles=10.0, event_name="outer")
+    tracer.start_event(track, ts_cycles=20.0, event_name="inner")
     tracer.end_event(track, ts_cycles=40.0)
     tracer.end_event(track, ts_cycles=60.0)
 
@@ -95,7 +85,7 @@ def test_end_event_name_mismatch_raises() -> None:
     tracer = PerfettoTracer()
     track = tracer.register_track("runner")
 
-    tracer.start_event(track, "outer", ts_cycles=1.0)
+    tracer.start_event(track, ts_cycles=1.0, event_name="outer")
 
     with pytest.raises(ValueError):
         tracer.end_event(track, ts_cycles=2.0, name="inner")
@@ -107,10 +97,10 @@ def test_complete_event_with_end_ts_and_dur() -> None:
     tracer = PerfettoTracer(ns_per_cycle=10.0)
     track = tracer.register_track("runner")
 
-    tracer.complete_event(track, "calc", start_ts=100.0, end_ts=160.0)
+    tracer.complete_event(track, start_ts=100.0, end_ts=160.0, name="calc")
     event_from_end = tracer._events[-1]
 
-    tracer.complete_event(track, "calc_dur", start_ts=200.0, dur=80.0)
+    tracer.complete_event(track, start_ts=200.0, dur=80.0, name="calc_dur")
     event_from_dur = tracer._events[-1]
 
     assert event_from_end["dur"] == pytest.approx(0.6)
@@ -119,10 +109,10 @@ def test_complete_event_with_end_ts_and_dur() -> None:
     assert event_from_dur["ts"] == pytest.approx(2.0)
 
     with pytest.raises(ValueError):
-        tracer.complete_event(track, "bad", start_ts=0.0, end_ts=10.0, dur=5.0)
+        tracer.complete_event(track, start_ts=0.0, end_ts=10.0, dur=5.0, name="bad")
 
     with pytest.raises(ValueError):
-        tracer.complete_event(track, "negative", start_ts=100.0, end_ts=50.0)
+        tracer.complete_event(track, start_ts=100.0, end_ts=50.0, name="negative")
 
 
 def test_record_event_context_manager() -> None:
@@ -134,7 +124,7 @@ def test_record_event_context_manager() -> None:
     def fake_time() -> float:
         return next(time_values)
 
-    with tracer.record_event(track, "scoped", fake_time):
+    with tracer.record_event(track, fake_time, "scoped"):
         pass
 
     begin_event, end_event = tracer._events[-2:]
@@ -148,7 +138,7 @@ def test_record_event_context_manager() -> None:
 def test_save_outputs_tracefile(tmp_path) -> None:
     tracer = PerfettoTracer()
     track = tracer.register_track("io")
-    tracer.complete_event(track, "write", start_ts=0.0, dur=100.0)
+    tracer.complete_event(track, start_ts=0.0, dur=100.0, name="write")
 
     output_path = tmp_path / "trace.json"
     tracer.save(str(output_path), display_time_unit="us")

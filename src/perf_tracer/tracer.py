@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
 import json
-import time
 from contextlib import contextmanager
 
 
@@ -28,11 +27,6 @@ class TrackInfo:
     module_info:ModuleInfo = field(default_factory=ModuleInfo)
     tid:int = -1
     track_name:str = ''
-    sub_track_name:Optional[str] = None
-
-    @property
-    def category(self) -> Optional[str]:
-        return self.sub_track_name
     
 
     @property
@@ -50,7 +44,7 @@ class PerfettoTracer:
 
 
     说明:
-    - 层次结构, module 对应 perfetto 中的 process, track 对应 perfetto 中的 thread, sub_track 对应 perfetto 中的 slice, 通过 category 区分
+    - 层次结构, module 对应 perfetto 中的 process, track 对应 perfetto 中的 thread
     - 传入的 cycles 会按: cycles * ns_per_cycle / 1000.0 -> 微秒(us) 存入 JSON.
     - 可使用 get_global_tracer() 获取全局实例，使用 init_global_tracer() 初始化全局实例
     """
@@ -149,34 +143,8 @@ class PerfettoTracer:
 
         return track_info
 
-    def register_sub_track(self, track_info: TrackInfo, sub_track_name: str) -> TrackInfo:
-        """创建一个 sub track, 本质上也是 TrackInfo, 不需要向 event 中添加东西"""
-        # 验证传入的 track_info 是否存在于已注册的 tracks 中
-        track_key = f"{track_info.module_name}.{track_info.track_name}"
-        if track_key not in self._registered_tracks:
-            raise ValueError(f"Track '{track_key}' is not registered. Please register the track first.")
 
-        # 检查传入的 track_info 是否与已注册的匹配
-        registered_track = self._registered_tracks[track_key]
-        if track_info.tid != registered_track.tid or track_info.module_info != registered_track.module_info:
-            raise ValueError(f"Provided track_info does not match the registered track '{track_key}'")
-
-        sub_track_info = TrackInfo(
-            module_info=track_info.module_info,
-            tid=track_info.tid,
-            track_name=track_info.track_name,
-            sub_track_name=sub_track_name
-        )
-
-        # 检查是否已经注册了相同的 sub_track
-        if sub_track_info in self._open_events:
-            return sub_track_info
-
-        # 初始化该 sub track 的 open events 栈
-        self._open_events[sub_track_info] = []
-        return sub_track_info
-
-    def start_event(self, track_info:TrackInfo, event_name: str, ts_cycles: float) -> None:
+    def start_event(self, track_info:TrackInfo, ts_cycles: float, event_name: str, category: Optional[str] = None) -> None:
         """
         开始一个带作用域的事件 (B). ts_cycles 以 cycles 为单位.
         必须与 end_event() 匹配 (同一 tid 栈式配对).
@@ -189,11 +157,11 @@ class PerfettoTracer:
             "tid": track_info.tid,
             "ts": ts_us,
             "name": event_name,
-            "cat": track_info.category,
+            "cat": category,
         })
         self._open_events[track_info].append(_OpenEvent(name=event_name, ts_us=ts_us))
 
-    def end_event(self,  track_info: TrackInfo, ts_cycles: float, name: Optional[str] = None) -> None:
+    def end_event(self,  track_info: TrackInfo, ts_cycles: float, name: Optional[str] = None, category: Optional[str] = None) -> None:
         """
         结束最近打开的事件(E) ts_cycles 以 cycles 为单位
         如果提供 name 参数, 会检查和栈顶事件的 name 是否一致
@@ -213,17 +181,18 @@ class PerfettoTracer:
             "pid": track_info.pid,
             "tid": track_info.tid,
             "ts": ts_us,
-            "cat": track_info.category,
+            "cat": category,
         })
         self._open_events[track_info].pop()
 
     def complete_event(
         self,
         track_info: TrackInfo,
-        name: str,
         start_ts: float,
         end_ts: Optional[float] = None,
         dur: Optional[float] = None,
+        name: str = "",
+        category: Optional[str] = None,
     ) -> None:
         """
         插入一个完整事件 (X). 所有时间参数均为 cycles.
@@ -249,7 +218,7 @@ class PerfettoTracer:
             "ts": start_us,
             "dur": dur_us,
             "name": name,
-            "cat": track_info.category,
+            "cat": category,
         })
 
     def save(self, path: str, display_time_unit: str = "ns") -> None:
@@ -299,17 +268,18 @@ class PerfettoTracer:
         return cls._global_instance
 
     @contextmanager
-    def record_event(self, track_info: TrackInfo, name: str, time_fn: Callable[[], float]):
+    def record_event(self, track_info: TrackInfo, time_fn: Callable[[], float], name: str, category: Optional[str] = None):
         """
         Context manager for recording a scoped event (B/E).
 
         Args:
             track_info: TrackInfo 实例
-            name: 事件名称
             time_fn: 返回当前时间 (cycles) 的函数
+            name: 事件名称
+            category: 事件分类
         """
         start_cycles = time_fn()
-        self.start_event(track_info, name, start_cycles)
+        self.start_event(track_info, start_cycles, name, category)
         try:
             yield None
         finally:

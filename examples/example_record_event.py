@@ -20,10 +20,10 @@ def main() -> None:
 
     print("Recording sleeps with record_event() ...")
 
-    with tracer.record_event(track, "sleep_500ms", cycles_from_perf_counter):
+    with tracer.record_event(track, cycles_from_perf_counter, "sleep_500ms"):
         time.sleep(0.5)
 
-    with tracer.record_event(track, "sleep_100ms", cycles_from_perf_counter):
+    with tracer.record_event(track, cycles_from_perf_counter, "sleep_100ms"):
         time.sleep(0.1)
 
     output_path = Path(__file__).with_name("record_event_trace.json")
