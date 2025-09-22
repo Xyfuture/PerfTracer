@@ -1,53 +1,37 @@
 #!/usr/bin/env python3
-"""
-Example demonstrating the record_event function with a 5-second sleep.
-"""
+"""Demonstrate the record_event context manager with real time data."""
+
+from __future__ import annotations
 
 import time
-from perf_tracer.tracer import PerfettoTracer
+from pathlib import Path
 
-def get_time_cycles() -> float:
-    """Return current time in nanoseconds for cycles."""
-    return time.time_ns()
+from perf_tracer import PerfettoTracer
 
-def main():
-    # Initialize tracer
-    tracer = PerfettoTracer(
-        process_name="SleepExample",
-        ns_per_cycle=1.0,  # 1 cycle = 1 nanosecond
-        pid=1
-    )
 
-    # Register a unit/track
-    sleep_unit = tracer.register_unit("SleepOperations")
+def cycles_from_perf_counter() -> float:
+    return float(time.perf_counter_ns())
 
-    print("Starting 5-second sleep test...")
-    print("This will record the sleep operation using record_event context manager")
 
-    # Record a 5-second sleep event using the context manager
-    with tracer.record_event(sleep_unit, "5_second_sleep", get_time_cycles):
-        print("  - Sleeping for 5 seconds...")
-        time.sleep(5)
-        print("  - Sleep completed!")
+def main() -> None:
+    tracer = PerfettoTracer(ns_per_cycle=1.0)
+    module = tracer.register_module("sleep-demo")
+    track = tracer.register_track("worker", module)
 
-    # Add another event for comparison
-    with tracer.record_event(sleep_unit, "short_sleep", get_time_cycles):
-        print("  - Sleeping for 1 second...")
-        time.sleep(1)
-        print("  - Short sleep completed!")
+    print("Recording sleeps with record_event() ...")
 
-    # Save the trace
-    output_file = "sleep_trace.json"
-    tracer.save(output_file)
-    print(f"\nTrace saved to {output_file}")
-    print("You can open this file in ui.perfetto.dev to visualize the timing")
+    with tracer.record_event(track, "sleep_500ms", cycles_from_perf_counter):
+        time.sleep(0.5)
 
-    # Print summary
-    print(f"\nSummary:")
-    print(f"- Process: {tracer.process_name}")
-    print(f"- Total events recorded: {len(tracer._events) - 2}")  # Subtract metadata events
-    print(f"- Time unit: {tracer.ns_per_cycle} ns/cycle")
-    print(f"- Output file: {output_file}")
+    with tracer.record_event(track, "sleep_100ms", cycles_from_perf_counter):
+        time.sleep(0.1)
+
+    output_path = Path(__file__).with_name("record_event_trace.json")
+    tracer.save(output_path.as_posix(), display_time_unit="ms")
+
+    print(f"Trace saved to {output_path}. Load it in https://ui.perfetto.dev to inspect the spans.")
+
 
 if __name__ == "__main__":
     main()
+

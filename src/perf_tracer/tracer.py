@@ -3,7 +3,7 @@ Tracer module for creating Perfetto-compatible trace events.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
 import json
 import time
@@ -16,25 +16,41 @@ class _OpenEvent:
     name: str
     ts_us: float
 
+@dataclass(frozen=True,eq=True)
+class ModuleInfo:
+    pid:int = 1
+    module_name:str = 'default'
+
+
+
+@dataclass(frozen=True,eq=True)
+class TrackInfo:
+    module_info:ModuleInfo = field(default_factory=ModuleInfo)
+    tid:int = -1
+    track_name:str = ''
+    sub_track_name:Optional[str] = None
+
+    @property
+    def category(self) -> Optional[str]:
+        return self.sub_track_name
+    
+
+    @property
+    def pid(self) -> int:
+        return self.module_info.pid
+    
+    @property
+    def module_name(self) -> str:
+        return self.module_info.module_name 
+    
 
 class PerfettoTracer:
     """
     PerfettoTracer emits the Chrome Trace Event JSON format, which Perfetto can import.
 
-    变更点:
-    - 对外 API 的时间参数一律以 "cycles" 为单位 (start_ts, end_ts, dur 均视为 cycles).
-    - 通过 ns_per_cycle 指定 "1 个周期 = ? ns", 内部再换算为微秒 (us) 写入 JSON.
-    - 默认显示单位改为 ns (displayTimeUnit="ns"), 更符合硬件仿真直觉.
-
-    典型用法:
-      tracer = PerfettoTracer(process_name="MySim", ns_per_cycle=0.5)  # 1 cycle = 0.5 ns
-      alu = tracer.register_unit("ALU")
-      tracer.complete_event(alu, "issue", start_cycles, end_ts=end_cycles)
-      tracer.start_event(alu, "execute", start_cycles)
-      tracer.end_event(alu, end_cycles)
-      tracer.save("trace.json")  # ui.perfetto.dev 打开
 
     说明:
+    - 层次结构, module 对应 perfetto 中的 process, track 对应 perfetto 中的 thread, sub_track 对应 perfetto 中的 slice, 通过 category 区分
     - 传入的 cycles 会按: cycles * ns_per_cycle / 1000.0 -> 微秒(us) 存入 JSON.
     - 可使用 get_global_tracer() 获取全局实例，使用 init_global_tracer() 初始化全局实例
     """
@@ -43,106 +59,167 @@ class PerfettoTracer:
 
     def __init__(
         self,
-        process_name: str = "Simulator",
         ns_per_cycle: float = 1.0,
-        pid: int = 1,
     ) -> None:
         """
         Initialize the PerfettoTracer.
 
         Args:
-            process_name: 进程名 (所有轨道共享同一 pid).
             ns_per_cycle: 1 个周期等于多少纳秒 (可为浮点数, 如 0.5 表示 1 cycle = 0.5 ns).
             pid: 进程 ID.
         """
-        self.process_name = process_name
         self.ns_per_cycle = float(ns_per_cycle)
         # 内部换算: cycle -> us
         # us = cycles * ns_per_cycle / 1000
         self._cycle_to_us = self.ns_per_cycle / 1000.0
-        self.pid = int(pid)
 
         self._next_tid = 1000
-        self._unit_to_tid: Dict[str, int] = {}
-        self._open_events: Dict[int, List[_OpenEvent]] = {}
-        self._events: List[Dict[str, Any]] = []
+        self._next_pid = 100000
 
-        # 进程元数据
-        self._events.append({
-            "ph": "M",
-            "pid": self.pid,
-            "tid": 0,
-            "name": "process_name",
-            "args": {"name": self.process_name},
-        })
+        # 记录所有 track info 和 module info，防止重复注册
+        self._registered_modules: Dict[str, ModuleInfo] = {}
+        self._registered_tracks: Dict[str, TrackInfo] = {}
+
+        self._open_events: Dict[TrackInfo, List[_OpenEvent]] = {}
+        self._events: List[Dict[str, Any]] = []
 
     def _cycles_to_us(self, cycles: float) -> float:
         """把 cycles 换算为微秒(us)."""
         return float(cycles) * self._cycle_to_us
 
-    def register_unit(self, unit_name: str) -> int:
-        """Register a new unit/track and return its thread ID."""
-        if unit_name in self._unit_to_tid:
-            return self._unit_to_tid[unit_name]
+    def register_module(self, module_name: str) -> ModuleInfo:
+        """创建一个 module, 对应 perfetto 中的 process , 返回 ModuleInfo"""
+        if module_name in self._registered_modules:
+            return self._registered_modules[module_name]
+
+        pid = self._next_pid
+        self._next_pid += 1
+
+        module_info = ModuleInfo(pid=pid, module_name=module_name)
+
+        # 记录到注册表
+        self._registered_modules[module_name] = module_info
+
+        # 添加进程元数据
+        self._events.append({
+            "ph": "M",
+            "pid": pid,
+            "name": "process_name",
+            "args": {"name": module_name},
+        })
+
+        return module_info 
+
+    def register_track(self, track_name: str, module_info: Optional[ModuleInfo] = None) -> TrackInfo:
+        """创建一个 track, 对应 perfetto 中的 thread, 返回一个TrackInfo"""
+
+        if module_info is None:
+            # Ensure the default module is registered
+            module_info = self.register_module("default")
+
+        # 构造唯一的 track key: module_name.track_name
+        track_key = f"{module_info.module_name}.{track_name}"
+
+        if track_key in self._registered_tracks:
+            return self._registered_tracks[track_key]
 
         tid = self._next_tid
         self._next_tid += 1
-        self._unit_to_tid[unit_name] = tid
-        self._open_events[tid] = []
 
-        # 线程 (轨道) 元数据
+        track_info = TrackInfo(
+            module_info=module_info,
+            tid=tid,
+            track_name=track_name
+        )
+
+        # 记录到注册表
+        self._registered_tracks[track_key] = track_info
+
+        # 初始化该 track 的 open events 栈
+        self._open_events[track_info] = []
+
+        # 添加线程元数据
         self._events.append({
             "ph": "M",
-            "pid": self.pid,
+            "pid": module_info.pid,
             "tid": tid,
             "name": "thread_name",
-            "args": {"name": unit_name},
+            "args": {"name": track_name},
         })
-        return tid
 
-    def start_event(self, tid_or_unit: int | str, name: str, ts_cycles: float) -> None:
+        return track_info
+
+    def register_sub_track(self, track_info: TrackInfo, sub_track_name: str) -> TrackInfo:
+        """创建一个 sub track, 本质上也是 TrackInfo, 不需要向 event 中添加东西"""
+        # 验证传入的 track_info 是否存在于已注册的 tracks 中
+        track_key = f"{track_info.module_name}.{track_info.track_name}"
+        if track_key not in self._registered_tracks:
+            raise ValueError(f"Track '{track_key}' is not registered. Please register the track first.")
+
+        # 检查传入的 track_info 是否与已注册的匹配
+        registered_track = self._registered_tracks[track_key]
+        if track_info.tid != registered_track.tid or track_info.module_info != registered_track.module_info:
+            raise ValueError(f"Provided track_info does not match the registered track '{track_key}'")
+
+        sub_track_info = TrackInfo(
+            module_info=track_info.module_info,
+            tid=track_info.tid,
+            track_name=track_info.track_name,
+            sub_track_name=sub_track_name
+        )
+
+        # 检查是否已经注册了相同的 sub_track
+        if sub_track_info in self._open_events:
+            return sub_track_info
+
+        # 初始化该 sub track 的 open events 栈
+        self._open_events[sub_track_info] = []
+        return sub_track_info
+
+    def start_event(self, track_info:TrackInfo, event_name: str, ts_cycles: float) -> None:
         """
         开始一个带作用域的事件 (B). ts_cycles 以 cycles 为单位.
         必须与 end_event() 匹配 (同一 tid 栈式配对).
         """
-        tid = self._resolve_tid(tid_or_unit)
         ts_us = self._cycles_to_us(ts_cycles)
+
         self._events.append({
             "ph": "B",
-            "pid": self.pid,
-            "tid": tid,
+            "pid": track_info.pid,
+            "tid": track_info.tid,
             "ts": ts_us,
-            "name": name,
+            "name": event_name,
+            "cat": track_info.category,
         })
-        self._open_events[tid].append(_OpenEvent(name=name, ts_us=ts_us))
+        self._open_events[track_info].append(_OpenEvent(name=event_name, ts_us=ts_us))
 
-    def end_event(self, tid_or_unit: int | str, ts_cycles: float, name: Optional[str] = None) -> None:
+    def end_event(self,  track_info: TrackInfo, ts_cycles: float, name: Optional[str] = None) -> None:
         """
         结束最近打开的事件(E) ts_cycles 以 cycles 为单位
         如果提供 name 参数, 会检查和栈顶事件的 name 是否一致
         """
-        tid = self._resolve_tid(tid_or_unit)
-        ts_us = self._cycles_to_us(ts_cycles)
-        if not self._open_events[tid]:
-            raise RuntimeError(f"No open events to end on tid {tid}")
+        if track_info not in self._open_events or not self._open_events[track_info]:
+            raise ValueError(f"No open events for track {track_info.track_name}")
 
-        top_event = self._open_events[tid][-1]
-        if name is not None and top_event.name != name:
-            raise RuntimeError(
-                f"End event name mismatch: expected '{top_event.name}', got '{name}'"
-            )
+        open_event = self._open_events[track_info][-1]
+
+        if name is not None and open_event.name != name:
+            raise ValueError(f"Expected to close event '{open_event.name}', but got '{name}'")
+
+        ts_us = self._cycles_to_us(ts_cycles)
 
         self._events.append({
             "ph": "E",
-            "pid": self.pid,
-            "tid": tid,
+            "pid": track_info.pid,
+            "tid": track_info.tid,
             "ts": ts_us,
+            "cat": track_info.category,
         })
-        self._open_events[tid].pop()
+        self._open_events[track_info].pop()
 
     def complete_event(
         self,
-        tid_or_unit: int | str,
+        track_info: TrackInfo,
         name: str,
         start_ts: float,
         end_ts: Optional[float] = None,
@@ -152,7 +229,6 @@ class PerfettoTracer:
         插入一个完整事件 (X). 所有时间参数均为 cycles.
         传 (start_ts + end_ts) 或 (start_ts + dur) 二选一.
         """
-        tid = self._resolve_tid(tid_or_unit)
         start_us = self._cycles_to_us(start_ts)
 
         if (end_ts is None) == (dur is None):
@@ -168,11 +244,12 @@ class PerfettoTracer:
 
         self._events.append({
             "ph": "X",
-            "pid": self.pid,
-            "tid": tid,
+            "pid": track_info.pid,
+            "tid": track_info.tid,
             "ts": start_us,
             "dur": dur_us,
             "name": name,
+            "cat": track_info.category,
         })
 
     def save(self, path: str, display_time_unit: str = "ns") -> None:
@@ -189,33 +266,21 @@ class PerfettoTracer:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
 
-    def _resolve_tid(self, tid_or_unit: int | str) -> int:
-        """Resolve thread ID from either thread ID or unit name."""
-        if isinstance(tid_or_unit, int):
-            return tid_or_unit
-        if tid_or_unit not in self._unit_to_tid:
-            raise KeyError(f"Unit '{tid_or_unit}' has not been registered. Call register_unit() first.")
-        return self._unit_to_tid[tid_or_unit]
-
     @classmethod
     def init_global_tracer(
         cls,
-        process_name: str = "Simulator",
         ns_per_cycle: float = 1.0,
-        pid: int = 1,
     ) -> PerfettoTracer:
         """
         初始化全局 PerfettoTracer 实例。
-        
+
         Args:
-            process_name: 进程名
             ns_per_cycle: 1 个周期等于多少纳秒
-            pid: 进程 ID
-            
+
         Returns:
             初始化的 PerfettoTracer 实例
         """
-        cls._global_instance = cls(process_name=process_name, ns_per_cycle=ns_per_cycle, pid=pid)
+        cls._global_instance = cls(ns_per_cycle=ns_per_cycle)
         return cls._global_instance
 
     @classmethod
@@ -234,19 +299,36 @@ class PerfettoTracer:
         return cls._global_instance
 
     @contextmanager
-    def record_event(self, tid_or_unit: int | str, name: str, time_fn: Callable[[], float]) -> None:
+    def record_event(self, track_info: TrackInfo, name: str, time_fn: Callable[[], float]):
         """
         Context manager for recording a scoped event (B/E).
-        
+
         Args:
-            tid_or_unit: 线程 ID 或单元名称
+            track_info: TrackInfo 实例
             name: 事件名称
             time_fn: 返回当前时间 (cycles) 的函数
         """
         start_cycles = time_fn()
-        self.start_event(tid_or_unit, name, start_cycles)
+        self.start_event(track_info, name, start_cycles)
         try:
             yield None
         finally:
             end_cycles = time_fn()
-            self.end_event(tid_or_unit, end_cycles)
+            self.end_event(track_info, end_cycles)
+
+    def get_module(self, module_name: str) -> Optional[ModuleInfo]:
+        """获取已注册的模块信息"""
+        return self._registered_modules.get(module_name)
+
+    def get_track(self, track_name: str, module_name: str = "default") -> Optional[TrackInfo]:
+        """获取已注册的轨道信息"""
+        track_key = f"{module_name}.{track_name}"
+        return self._registered_tracks.get(track_key)
+
+    def list_modules(self) -> List[str]:
+        """列出所有已注册的模块名称"""
+        return list(self._registered_modules.keys())
+
+    def list_tracks(self) -> List[str]:
+        """列出所有已注册的轨道名称 (格式: module_name.track_name)"""
+        return list(self._registered_tracks.keys())

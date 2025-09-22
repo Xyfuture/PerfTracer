@@ -1,41 +1,31 @@
-"""
-Example usage of PerfTracer.
-"""
+"""Basic usage for generating a Perfetto trace with PerfettoTracer."""
+
+from __future__ import annotations
+
+from pathlib import Path
 
 from perf_tracer import PerfettoTracer
 
 
-def main():
-    """Example demonstrating basic usage of PerfettoTracer."""
-    # Create tracer with custom settings
-    tracer = PerfettoTracer(
-        process_name="MySimulator",
-        ns_per_cycle=0.5,  # 1 cycle = 0.5 ns
-        pid=1
-    )
-    
-    # Register units/tracks
-    alu = tracer.register_unit("ALU")
-    fpu = tracer.register_unit("FPU")
-    memory = tracer.register_unit("Memory")
-    
-    # Add complete events
-    tracer.complete_event(alu, "add_operation", start_ts=100, end_ts=150)
-    tracer.complete_event(fpu, "mul_operation", start_ts=120, end_ts=180)
-    tracer.complete_event(memory, "load", start_ts=80, end_ts=110)
-    tracer.complete_event(memory, "store", start_ts=160, end_ts=190)
-    
-    # Add scoped events
-    tracer.start_event(alu, "complex_calculation", ts_cycles=200)
-    tracer.start_event(fpu, "sqrt_operation", ts_cycles=210)
-    tracer.end_event(fpu, ts_cycles=230)
-    tracer.end_event(alu, ts_cycles=250)
-    
-    # Save the trace
-    tracer.save("example_trace.json")
-    print("Trace saved to example_trace.json")
-    print("Open https://ui.perfetto.dev to analyze the trace")
+def main() -> None:
+    tracer = PerfettoTracer(ns_per_cycle=2.5)
+
+    cpu_module = tracer.register_module("cpu")
+    fetch_track = tracer.register_track("fetch", cpu_module)
+    execute_track = tracer.register_track("execute", cpu_module)
+    execute_stage = tracer.register_sub_track(execute_track, "alu")
+
+    tracer.complete_event(fetch_track, "fetch_instruction", start_ts=0.0, dur=120.0)
+    tracer.complete_event(execute_track, "decode", start_ts=80.0, dur=140.0)
+
+    tracer.start_event(execute_stage, "alu_window", ts_cycles=260.0)
+    tracer.end_event(execute_stage, ts_cycles=520.0)
+
+    trace_path = Path(__file__).with_name("basic_trace.json")
+    tracer.save(trace_path.as_posix())
+    print(f"Trace saved to {trace_path}. Import it at https://ui.perfetto.dev")
 
 
 if __name__ == "__main__":
     main()
+
